@@ -1,0 +1,516 @@
+// app/page.tsx
+"use client";
+
+import React, { useMemo, useState } from "react";
+
+type Vertical = "str" | "cabinet" | "stone";
+
+type Lead = {
+  id: string;
+  name: string;
+  address?: string;
+  phone?: string;
+  website?: string;
+  category?: string;
+  source: "osm" | "google" | "yelp";
+  sourceUrl?: string;
+  lat?: number;
+  lon?: number;
+  score: number;
+  scoreReasons: string[];
+};
+
+type ApiResponse = {
+  ok: boolean;
+  query?: {
+    zip: string;
+    radiusMiles: number;
+    vertical: Vertical;
+    includeGoogle: boolean;
+    includeYelp: boolean;
+  };
+  leads?: Lead[];
+  stats?: {
+    total: number;
+    bySource: Record<string, number>;
+    avgScore: number;
+  };
+  error?: string;
+};
+
+const VERTICALS: { value: Vertical; label: string; hint: string }[] = [
+  { value: "str", label: "STR / Airbnb Operators", hint: "Property managers, vacation rentals, hospitality" },
+  { value: "cabinet", label: "Cabinet Contractors", hint: "Cabinetry, millwork, kitchen/bath remodel" },
+  { value: "stone", label: "Granite / Stone Shops", hint: "Granite, quartz, marble, countertop fabricators" }
+];
+
+const RADII = [5, 10, 15, 20];
+
+function downloadCSV(filename: string, rows: any[]) {
+  const header = [
+    "name",
+    "address",
+    "phone",
+    "website",
+    "category",
+    "source",
+    "score",
+    "scoreReasons",
+    "sourceUrl",
+    "lat",
+    "lon"
+  ];
+
+  const escape = (v: any) => {
+    const s = String(v ?? "");
+    const needs = /[",\n]/.test(s);
+    const safe = s.replace(/"/g, '""');
+    return needs ? `"${safe}"` : safe;
+  };
+
+  const lines = [header.join(",")].concat(
+    rows.map((r) =>
+      header
+        .map((k) => {
+          if (k === "scoreReasons") return escape((r.scoreReasons || []).join("; "));
+          return escape(r[k]);
+        })
+        .join(",")
+    )
+  );
+
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export default function Page() {
+  const [zip, setZip] = useState("33702");
+  const [radiusMiles, setRadiusMiles] = useState<number>(10);
+  const [vertical, setVertical] = useState<Vertical>("stone");
+  const [includeGoogle, setIncludeGoogle] = useState(false);
+  const [includeYelp, setIncludeYelp] = useState(false);
+
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [stats, setStats] = useState<ApiResponse["stats"] | null>(null);
+
+  const [minScore, setMinScore] = useState(0);
+  const [search, setSearch] = useState("");
+
+  const verticalMeta = useMemo(() => VERTICALS.find((v) => v.value === vertical)!, [vertical]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return (leads || [])
+      .filter((l) => l.score >= minScore)
+      .filter((l) => {
+        if (!q) return true;
+        const hay = `${l.name} ${l.address ?? ""} ${l.phone ?? ""} ${l.website ?? ""} ${l.category ?? ""} ${l.source}`.toLowerCase();
+        return hay.includes(q);
+      })
+      .sort((a, b) => b.score - a.score);
+  }, [leads, minScore, search]);
+
+  async function run() {
+    setLoading(true);
+    setErr(null);
+    setLeads([]);
+    setStats(null);
+
+    try {
+      const res = await fetch("/api/leads", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          zip,
+          radiusMiles,
+          vertical,
+          includeGoogle,
+          includeYelp
+        })
+      });
+
+      const data = (await res.json()) as ApiResponse;
+      if (!res.ok || !data.ok) throw new Error(data.error || `Request failed (${res.status})`);
+
+      setLeads(data.leads || []);
+      setStats(data.stats || null);
+    } catch (e: any) {
+      setErr(e?.message || "Unknown error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const badge = (text: string) => (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        fontSize: 12,
+        padding: "2px 8px",
+        borderRadius: 999,
+        border: "1px solid rgba(255,255,255,0.14)",
+        background: "rgba(255,255,255,0.06)"
+      }}
+    >
+      {text}
+    </span>
+  );
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#0b0d12", color: "white" }}>
+      <div style={{ maxWidth: 1100, margin: "0 auto", padding: "28px 16px 64px" }}>
+        <header style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+            <h1 style={{ margin: 0, fontSize: 22, letterSpacing: 0.2 }}>Prospecting Research Tool</h1>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              {badge("OSM (free)")}
+              {badge(includeGoogle ? "Google: ON" : "Google: OFF")}
+              {badge(includeYelp ? "Yelp: ON" : "Yelp: OFF")}
+            </div>
+          </div>
+
+          <p style={{ margin: 0, opacity: 0.8, fontSize: 13 }}>
+            Pick a vertical + radius, pull leads, score them, dedupe them, and export CSV.
+          </p>
+        </header>
+
+        {/* Controls */}
+        <section
+          style={{
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 14,
+            background: "rgba(255,255,255,0.04)",
+            padding: 14,
+            marginBottom: 14
+          }}
+        >
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
+            <div style={{ gridColumn: "span 3" }}>
+              <label style={{ fontSize: 12, opacity: 0.85 }}>Start ZIP</label>
+              <input
+                value={zip}
+                onChange={(e) => setZip(e.target.value)}
+                inputMode="numeric"
+                placeholder="33702"
+                style={{
+                  width: "100%",
+                  marginTop: 6,
+                  padding: "10px 10px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  background: "rgba(0,0,0,0.25)",
+                  color: "white",
+                  outline: "none"
+                }}
+              />
+            </div>
+
+            <div style={{ gridColumn: "span 3" }}>
+              <label style={{ fontSize: 12, opacity: 0.85 }}>Radius (miles)</label>
+              <select
+                value={radiusMiles}
+                onChange={(e) => setRadiusMiles(Number(e.target.value))}
+                style={{
+                  width: "100%",
+                  marginTop: 6,
+                  padding: "10px 10px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  background: "rgba(0,0,0,0.25)",
+                  color: "white",
+                  outline: "none"
+                }}
+              >
+                {RADII.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div style={{ gridColumn: "span 6" }}>
+              <label style={{ fontSize: 12, opacity: 0.85 }}>Vertical</label>
+              <select
+                value={vertical}
+                onChange={(e) => setVertical(e.target.value as Vertical)}
+                style={{
+                  width: "100%",
+                  marginTop: 6,
+                  padding: "10px 10px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  background: "rgba(0,0,0,0.25)",
+                  color: "white",
+                  outline: "none"
+                }}
+              >
+                {VERTICALS.map((v) => (
+                  <option key={v.value} value={v.value}>
+                    {v.label}
+                  </option>
+                ))}
+              </select>
+              <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>{verticalMeta.hint}</div>
+            </div>
+
+            <div style={{ gridColumn: "span 6" }}>
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 4 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, opacity: 0.9 }}>
+                  <input
+                    type="checkbox"
+                    checked={includeGoogle}
+                    onChange={(e) => setIncludeGoogle(e.target.checked)}
+                  />
+                  Include Google Places (requires API key)
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, opacity: 0.9 }}>
+                  <input type="checkbox" checked={includeYelp} onChange={(e) => setIncludeYelp(e.target.checked)} />
+                  Include Yelp (requires API key)
+                </label>
+              </div>
+              <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>
+                Tool works with OSM only. Add keys later if you want more depth.
+              </div>
+            </div>
+
+            <div style={{ gridColumn: "span 6", display: "flex", alignItems: "flex-end", justifyContent: "flex-end" }}>
+              <button
+                onClick={run}
+                disabled={loading}
+                style={{
+                  width: "100%",
+                  padding: "11px 12px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,255,255,0.16)",
+                  background: loading ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.16)",
+                  color: "white",
+                  fontWeight: 600,
+                  cursor: loading ? "not-allowed" : "pointer"
+                }}
+              >
+                {loading ? "Searching…" : "Run Search"}
+              </button>
+            </div>
+          </div>
+
+          {err && (
+            <div
+              style={{
+                marginTop: 12,
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid rgba(255,90,90,0.35)",
+                background: "rgba(255,90,90,0.10)",
+                color: "rgba(255,220,220,0.95)",
+                fontSize: 13
+              }}
+            >
+              {err}
+            </div>
+          )}
+        </section>
+
+        {/* Stats + Filters */}
+        <section
+          style={{
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 14,
+            background: "rgba(255,255,255,0.04)",
+            padding: 14,
+            marginBottom: 14
+          }}
+        >
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <div style={{ fontSize: 13, opacity: 0.85 }}>
+                Leads: <strong>{leads.length}</strong>
+              </div>
+              <div style={{ fontSize: 13, opacity: 0.85 }}>
+                Showing: <strong>{filtered.length}</strong>
+              </div>
+              <div style={{ fontSize: 13, opacity: 0.85 }}>
+                Avg score: <strong>{stats?.avgScore ?? (leads.length ? Math.round(leads.reduce((a, b) => a + b.score, 0) / leads.length) : 0)}</strong>
+              </div>
+
+              {stats?.bySource && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {Object.entries(stats.bySource).map(([k, v]) => (
+                    <span key={k} style={{ fontSize: 12, opacity: 0.8 }}>
+                      {badge(`${k}: ${v}`)}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search name, address, etc."
+                style={{
+                  width: 240,
+                  padding: "10px 10px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  background: "rgba(0,0,0,0.25)",
+                  color: "white",
+                  outline: "none"
+                }}
+              />
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 12, opacity: 0.75 }}>Min score</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={minScore}
+                  onChange={(e) => setMinScore(Number(e.target.value))}
+                  style={{
+                    width: 80,
+                    padding: "10px 10px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(255,255,255,0.14)",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "white",
+                    outline: "none"
+                  }}
+                />
+              </div>
+
+              <button
+                onClick={() => downloadCSV(`leads_${vertical}_${zip}_${radiusMiles}mi.csv`, filtered)}
+                disabled={!filtered.length}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,255,255,0.16)",
+                  background: filtered.length ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.06)",
+                  color: "white",
+                  fontWeight: 600,
+                  cursor: filtered.length ? "pointer" : "not-allowed"
+                }}
+              >
+                Export CSV
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {/* Leads table */}
+        <section
+          style={{
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 14,
+            background: "rgba(255,255,255,0.04)",
+            overflow: "hidden"
+          }}
+        >
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ background: "rgba(0,0,0,0.25)" }}>
+                  {["Score", "Name", "Category", "Phone", "Website", "Address", "Source"].map((h) => (
+                    <th
+                      key={h}
+                      style={{
+                        textAlign: "left",
+                        padding: "12px 12px",
+                        fontSize: 12,
+                        opacity: 0.8,
+                        borderBottom: "1px solid rgba(255,255,255,0.10)",
+                        whiteSpace: "nowrap"
+                      }}
+                    >
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {!filtered.length ? (
+                  <tr>
+                    <td colSpan={7} style={{ padding: 16, fontSize: 13, opacity: 0.75 }}>
+                      {loading ? "Searching…" : "No leads yet. Run a search."}
+                    </td>
+                  </tr>
+                ) : (
+                  filtered.map((l) => (
+                    <tr key={l.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+                      <td style={{ padding: "10px 12px", fontSize: 13, whiteSpace: "nowrap" }}>
+                        <strong>{l.score}</strong>
+                        <div style={{ fontSize: 11, opacity: 0.65, marginTop: 4 }}>
+                          {(l.scoreReasons || []).slice(0, 2).join(" • ")}
+                        </div>
+                      </td>
+                      <td style={{ padding: "10px 12px", fontSize: 13, minWidth: 220 }}>
+                        <div style={{ fontWeight: 650 }}>{l.name}</div>
+                        {l.sourceUrl && (
+                          <a
+                            href={l.sourceUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ fontSize: 12, opacity: 0.8, textDecoration: "underline" }}
+                          >
+                            Open source
+                          </a>
+                        )}
+                      </td>
+                      <td style={{ padding: "10px 12px", fontSize: 13, opacity: 0.9, whiteSpace: "nowrap" }}>
+                        {l.category || "—"}
+                      </td>
+                      <td style={{ padding: "10px 12px", fontSize: 13, whiteSpace: "nowrap" }}>
+                        {l.phone ? (
+                          <a href={`tel:${l.phone}`} style={{ textDecoration: "underline", color: "white" }}>
+                            {l.phone}
+                          </a>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td style={{ padding: "10px 12px", fontSize: 13, minWidth: 220 }}>
+                        {l.website ? (
+                          <a href={l.website} target="_blank" rel="noreferrer" style={{ textDecoration: "underline", color: "white" }}>
+                            {l.website}
+                          </a>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td style={{ padding: "10px 12px", fontSize: 13, minWidth: 260, opacity: 0.9 }}>
+                        {l.address || "—"}
+                      </td>
+                      <td style={{ padding: "10px 12px", fontSize: 13, whiteSpace: "nowrap", opacity: 0.9 }}>
+                        {l.source.toUpperCase()}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <footer style={{ marginTop: 14, fontSize: 12, opacity: 0.65, lineHeight: 1.4 }}>
+          Notes:
+          <ul style={{ marginTop: 6 }}>
+            <li>Google/Yelp toggles require API keys in your Vercel environment variables.</li>
+            <li>Scoring is heuristic. You can tune scoring rules in the API route.</li>
+            <li>Next step is adding “refresh-on-run lead discovery” and a simple local DB (e.g., Vercel KV / Postgres) for history.</li>
+          </ul>
+        </footer>
+      </div>
+    </div>
+  );
+}
